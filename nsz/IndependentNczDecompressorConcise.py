@@ -4,6 +4,7 @@
 from sys import argv
 from pathlib import Path
 from hashlib import sha256
+from nsz.mac_crypto import create_aes_cipher as AES_new
 from Crypto.Cipher import AES
 from Crypto.Util import Counter
 from zstandard import ZstdDecompressor
@@ -33,7 +34,7 @@ class AESCTR:
 
 	def seek(self, offset):
 		self.ctr = Counter.new(64, prefix=self.nonce[0:8], initial_value=(offset >> 4))
-		self.aes = AES.new(self.key, AES.MODE_CTR, counter=self.ctr)
+		self.aes = AES_new(self.key, AES.MODE_CTR, counter=self.ctr)
 
 
 class Section:

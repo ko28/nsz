@@ -2,6 +2,7 @@
 # SciresM, 2017
 from struct import unpack as up, pack as pk
 from binascii import hexlify as hx, unhexlify as uhx
+from nsz.mac_crypto import create_aes_cipher as AES_new
 from Crypto.Cipher import AES
 from Crypto.Util import Counter
 
@@ -67,7 +68,7 @@ class AESCTR:
 
 	def seek(self, offset):
 		self.ctr = Counter.new(64, prefix=self.nonce[0:8], initial_value=(offset >> 4))
-		self.aes = AES.new(self.key, AES.MODE_CTR, counter=self.ctr)
+		self.aes = AES_new(self.key, AES.MODE_CTR, counter=self.ctr)
 		
 	def bktrPrefix(self, ctr_val):
 		return self.nonce[0:4] + ctr_val.to_bytes(4, 'big')
@@ -75,7 +76,7 @@ class AESCTR:
 	def bktrSeek(self, offset, ctr_val, virtualOffset = 0):
 		offset += virtualOffset
 		self.ctr = Counter.new(64, prefix=self.bktrPrefix(ctr_val), initial_value=(offset >> 4))
-		self.aes = AES.new(self.key, AES.MODE_CTR, counter=self.ctr)
+		self.aes = AES_new(self.key, AES.MODE_CTR, counter=self.ctr)
 
 class AESXTS:
 	'''Class for performing AES XTS cipher operations'''
