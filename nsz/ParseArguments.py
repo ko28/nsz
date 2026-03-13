@@ -3,6 +3,12 @@ from argparse import ArgumentParser
 class ParseArguments:
 	@staticmethod
 	def parse():
+		"""
+		Parse command-line arguments for the NSZ utility.
+		
+		Returns:
+			args (argparse.Namespace): Parsed command-line arguments. The namespace contains a 'file' list and attributes for the defined options and flags (e.g., compression/decompression modes, level, long/block/solid modes, verify/quick-verify, output, extract/create controls, undupe options, threads/multi, and other flags).
+		"""
 		parser = ArgumentParser()
 		parser.add_argument('file', nargs='*')
 		parser.add_argument('-C', action='store_true', help='Compress NSP/XCI')
@@ -39,6 +45,7 @@ class ParseArguments:
 		parser.add_argument('--undupe-old-versions',action='store_true', default=False, help='Removes every old version as long there is a newer one of the same titleID.')
 		parser.add_argument('-c', '--create', help='Inverse of --extract. Repacks files/folders to an NSP. Example: --create out.nsp .\\in')
 		parser.add_argument('--machine-readable', action='store_true', default=False, help='Restricts terminal output and reports in a way that is easier for a machine to read.')
+		parser.add_argument('--darwin-native-crypto', action='store_true', default=False, help='Enable the macOS native crypto backend.')
 
 		args = parser.parse_args()
 		return args

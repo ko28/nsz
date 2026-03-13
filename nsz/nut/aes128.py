@@ -1,5 +1,8 @@
 # Pure python AES128 implementation
 # SciresM, 2017
+import importlib as _importlib
+import sys as _sys
+import warnings as _warnings
 from struct import unpack as up, pack as pk
 from binascii import hexlify as hx, unhexlify as uhx
 from Crypto.Cipher import AES
@@ -421,8 +424,82 @@ class AESECB:
 		return self.send_through_sbox(self.rotate_op(word), sbox) ^ (self.rcon_op(i) << 0x18)
 
 	def pad_block(self, block):
-		'''Pads a block using CMS padding.'''
+		"""
+		Pad a partial block to the instance block_size using CMS (each padding byte is the pad length).
+		
+		Parameters:
+			block (bytes): Input bytes whose length must be less than or equal to the instance's block_size.
+		
+		Returns:
+			padded (bytes): The input followed by N bytes of value N, where N = block_size - len(block).
+		
+		Raises:
+			AssertionError: If len(block) is greater than the instance's block_size.
+		"""
 		assert(len(block) <= self.block_size)
 		num_pad = self.block_size - len(block)
 		right = (chr(num_pad) * num_pad).encode()
 		return block + right
+
+import platform as _platform
+
+_DARWIN_NATIVE_CRYPTO_FLAG = '--darwin-native-crypto'
+
+def _darwin_crypto_enabled(argv=None):
+	"""
+	Check whether the Darwin native crypto flag is present in the given argument list.
+	
+	Parameters:
+		argv (list[str] | None): Command-line arguments to inspect (typically sys.argv[1:]). If None, the current process's argv[1:] is used.
+	
+	Returns:
+		True if the Darwin native crypto flag is present in `argv`, False otherwise.
+	"""
+	argv = _sys.argv[1:] if argv is None else argv
+	return _DARWIN_NATIVE_CRYPTO_FLAG in argv
+
+def _load_darwin_overrides(import_module=None, warn=None):
+	"""
+	Attempt to load a Darwin-specific native crypto backend and return its AES overrides.
+	
+	Tries to import the module 'nsz.nut.mac_crypto' and, if successful, calls its
+	build_darwin_overrides function with the in-file AES classes and helpers, returning
+	the resulting overrides object. If the import fails, emits a RuntimeWarning and
+	returns `None`.
+	
+	Parameters:
+		import_module (Callable[[str], ModuleType], optional): Import function to use;
+			provided for injection in tests. Defaults to the standard importlib.import_module.
+		warn (Callable[[str, type, int], None], optional): Warning function to use;
+			provided for injection in tests. Defaults to warnings.warn.
+	
+	Returns:
+		Module or object with replacement AES implementations as returned by
+		mac_crypto.build_darwin_overrides, or `None` if the Darwin backend could not be loaded.
+	"""
+	import_module = import_module or _importlib.import_module
+	warn = warn or _warnings.warn
+	try:
+		mac_crypto = import_module('nsz.nut.mac_crypto')
+	except (ImportError, OSError) as exc:
+		warn(
+			f'Failed to load Darwin crypto backend, falling back to pure Python: {exc}',
+			RuntimeWarning,
+			stacklevel=2,
+		)
+		return None
+
+	return mac_crypto.build_darwin_overrides(
+		AESCBC,
+		AESCTR,
+		AESXTS,
+		AESXTSN,
+		AESECB,
+		Counter.new,
+		uhx,
+	)
+
+if _platform.system() == 'Darwin' and _darwin_crypto_enabled():
+	_overrides = _load_darwin_overrides()
+	if _overrides is not None:
+		AESCBC, AESCTR, AESXTS, AESXTSN, AESECB = _overrides
