@@ -165,6 +165,14 @@ class ImportHookTests(unittest.TestCase):
 
 
 class ContractTests(unittest.TestCase):
+    def test_ecb_pad_block_rejects_oversized_blocks(self):
+        _, _, wrappers = _build_wrappers()
+        AESECB = wrappers[4]
+        cipher = AESECB(b"k" * 16)
+
+        with self.assertRaisesRegex(ValueError, "Block must be at most 10 bytes!"):
+            cipher.pad_block(b"x" * 17)
+
     def test_parse_arguments_accepts_darwin_crypto_flag(self):
         parse_arguments = _load_source_module(
             PARSE_ARGUMENTS_PATH,
@@ -210,6 +218,61 @@ class ContractTests(unittest.TestCase):
 
 
 class FallbackTests(unittest.TestCase):
+    def test_non_darwin_module_builds_wrappers_that_fall_back_cleanly(self):
+        pure = _load_pure_aes128()
+        mac_crypto = _load_source_module(
+            MAC_CRYPTO_PATH,
+            "test_mac_crypto_non_darwin",
+            platform_name="Linux",
+        )
+        wrappers = mac_crypto.build_darwin_overrides(
+            pure.AESCBC,
+            pure.AESCTR,
+            pure.AESXTS,
+            pure.AESXTSN,
+            pure.AESECB,
+            pure.Counter.new,
+            pure.uhx,
+        )
+        AESECB = wrappers[4]
+        key = b"k" * 16
+        data = b"d" * 32
+
+        cipher = AESECB(key)
+
+        self.assertIsNotNone(cipher._fallback)
+        self.assertEqual(cipher.encrypt(data), pure.AESECB(key).encrypt(data))
+
+    def test_cbc_probe_results_are_cached(self):
+        _, mac_crypto, wrappers = _build_wrappers()
+        AESCBC = wrappers[0]
+        init_calls = []
+
+        class FakeMacAESCBC:
+            def __init__(self, key, iv, encrypt):
+                init_calls.append((len(key), len(iv), encrypt))
+
+            def encrypt(self, data):
+                return data
+
+            def decrypt(self, data):
+                return data
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+        with mock.patch.object(mac_crypto, "MacAESCBC", FakeMacAESCBC):
+            AESCBC(b"k" * 16, b"i" * 16)
+            AESCBC(b"z" * 16, b"j" * 16)
+
+        self.assertEqual(
+            init_calls,
+            [(16, 16, True), (16, 16, False)],
+        )
+
     def test_cbc_falls_back_only_for_backend_init_failures(self):
         pure, mac_crypto, wrappers = _build_wrappers()
         AESCBC = wrappers[0]
@@ -248,6 +311,44 @@ class FallbackTests(unittest.TestCase):
         pure_cipher = pure.AESCTR(key, nonce, 0x40)
         pure_cipher.bktrSeek(0x80, 7)
         self.assertEqual(cipher.encrypt(data), pure_cipher.encrypt(data))
+
+    def test_ctr_seek_releases_replaced_native_contexts(self):
+        _, mac_crypto, wrappers = _build_wrappers()
+        AESCTR = wrappers[1]
+        instances = []
+
+        class FakeMacAESCTR:
+            def __init__(self, key, iv):
+                self.released = 0
+                instances.append(self)
+
+            def encrypt(self, data):
+                return data
+
+            def decrypt(self, data):
+                return data
+
+            def _release(self):
+                self.released += 1
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self._release()
+
+        with mock.patch.object(mac_crypto, "MacAESCTR", FakeMacAESCTR):
+            cipher = AESCTR(b"k" * 16, b"n" * 16, 0)
+            self.assertEqual(len(instances), 2)
+            self.assertEqual(instances[1].released, 0)
+
+            cipher.seek(0x40)
+            self.assertEqual(instances[1].released, 1)
+            self.assertEqual(instances[2].released, 0)
+
+            cipher.bktrSeek(0x80, 7)
+            self.assertEqual(instances[2].released, 1)
+            self.assertEqual(instances[3].released, 0)
 
     def test_ecb_falls_back_only_for_backend_init_failures(self):
         pure, mac_crypto, wrappers = _build_wrappers()

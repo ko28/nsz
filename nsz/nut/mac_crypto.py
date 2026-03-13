@@ -16,6 +16,7 @@ kCCModeOptionCTR_BE  = 0x0001
 
 _AES128_KEY_SIZE_ERROR = "Key must be of size %X!" % 0x10
 _NATIVE_INIT_FALLBACK_EXCEPTIONS = (OSError, RuntimeError)
+_cc = None
 
 # Phase 3: ctypes Bindings
 if platform.system() == "Darwin":
@@ -69,16 +70,19 @@ class _MacAESBase:
         self.block_size = 16
 
     def _init_cryptor(self, op, mode, key, iv, tweak, tweak_len, options):
-        status = _cc.CCCryptorCreateWithMode(
-            op, mode, kCCAlgorithmAES,
-            0,
-            iv,
-            key, len(key),
-            tweak, tweak_len,
-            0,
-            options,
-            ctypes.byref(self._cryptor_ref),
-        )
+        try:
+            status = _cc.CCCryptorCreateWithMode(
+                op, mode, kCCAlgorithmAES,
+                0,
+                iv,
+                key, len(key),
+                tweak, tweak_len,
+                0,
+                options,
+                ctypes.byref(self._cryptor_ref),
+            )
+        except AttributeError as exc:
+            raise RuntimeError("CommonCrypto backend is unavailable on this platform") from exc
         if status != kCCSuccess:
             raise RuntimeError(
                 f"CCCryptorCreateWithMode failed (status={status}). "
@@ -216,6 +220,8 @@ class MacAESECB(_MacAESBase):
 
 
 def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, pure_aesecb, counter_new, uhx_fn):
+    _cbc_backend_probe_cache = {}
+
     def validate_aes128_key(key):
         key = bytes(key)
         if len(key) != 16:
@@ -233,6 +239,18 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
             encrypt_cipher.encrypt(b"\0" * 16)
         with MacAESCBC(key, iv, encrypt=False) as decrypt_cipher:
             decrypt_cipher.decrypt(b"\0" * 16)
+
+    def cbc_backend_available(key, iv):
+        cache_key = (len(key), len(iv))
+        if cache_key in _cbc_backend_probe_cache:
+            return _cbc_backend_probe_cache[cache_key]
+        try:
+            probe_cbc_backend(key, iv)
+        except _NATIVE_INIT_FALLBACK_EXCEPTIONS:
+            _cbc_backend_probe_cache[cache_key] = False
+        else:
+            _cbc_backend_probe_cache[cache_key] = True
+        return _cbc_backend_probe_cache[cache_key]
 
     def probe_ctr_backend(key, iv):
         with MacAESCTR(key, iv) as cipher:
@@ -296,7 +314,8 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
             return self._decrypt_cipher.decrypt(block)
 
         def pad_block(self, block):
-            assert len(block) <= self.block_size
+            if len(block) > self.block_size:
+                raise ValueError("Block must be at most %X bytes!" % self.block_size)
             num_pad = self.block_size - len(block)
             right = (chr(num_pad) * num_pad).encode()
             return block + right
@@ -311,9 +330,7 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
                 raise ValueError("IV must be of size %X!" % self.block_size)
             self.iv = bytes(iv)
             self._fallback = None
-            try:
-                probe_cbc_backend(self.key, self.iv)
-            except _NATIVE_INIT_FALLBACK_EXCEPTIONS:
+            if not cbc_backend_available(self.key, self.iv):
                 self._fallback = pure_aescbc(self.key, self.iv)
 
         def encrypt(self, data, iv=None):
@@ -363,6 +380,13 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
         def _set_ctr_state(self, prefix, offset):
             self.ctr = counter_new(64, prefix=prefix, initial_value=(offset >> 4))
 
+        def _replace_native_aes(self, prefix, offset):
+            new_aes = MacAESCTR(self.key, self._iv_from_prefix(prefix, offset))
+            old_aes = self.aes
+            self.aes = new_aes
+            if hasattr(old_aes, "_release"):
+                old_aes._release()
+
         def encrypt(self, data, ctr=None):
             if self._fallback is not None:
                 return self._fallback.encrypt(data, ctr)
@@ -379,7 +403,7 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
                 self._fallback.seek(offset)
                 self.aes = self._fallback.aes
                 return
-            self.aes = MacAESCTR(self.key, self._iv_from_prefix(self.nonce[0:8], offset))
+            self._replace_native_aes(self.nonce[0:8], offset)
 
         def bktrPrefix(self, ctr_val):
             return self.nonce[0:4] + ctr_val.to_bytes(4, "big")
@@ -392,7 +416,7 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
                 self._fallback.bktrSeek(offset, ctr_val)
                 self.aes = self._fallback.aes
                 return
-            self.aes = MacAESCTR(self.key, self._iv_from_prefix(prefix, offset))
+            self._replace_native_aes(prefix, offset)
 
         def _iv_from_prefix(self, prefix, offset):
             return bytes(prefix) + (offset >> 4).to_bytes(8, "big")
