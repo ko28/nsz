@@ -5,7 +5,7 @@ from sys import path
 from pathlib import Path
 
 from sys import argv
-from nsz.nut import Keys, Print
+from nsz.nut import Keys, Print, aes128
 from os import listdir, _exit, remove
 from time import sleep
 from nsz.Fs import Nsp, Hfs0, factory
@@ -91,6 +91,10 @@ err = []
 
 machineReadableOutput = False
 
+def _configure_darwin_native_crypto(args):
+	if getattr(args, 'darwin_native_crypto', False):
+		aes128.enable_darwin_overrides()
+
 def main():
 	global err
 	global machineReadableOutput
@@ -128,6 +132,8 @@ def main():
 			if args == None:
 				Print.info("Done!")
 				return
+
+		_configure_darwin_native_crypto(args)
 
 		if args.quick_verify:
 			args.verify = True

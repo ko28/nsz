@@ -1,5 +1,7 @@
 # Pure python AES128 implementation
 # SciresM, 2017
+import importlib as _importlib
+import warnings as _warnings
 from struct import unpack as up, pack as pk
 from binascii import hexlify as hx, unhexlify as uhx
 from Crypto.Cipher import AES
@@ -426,3 +428,44 @@ class AESECB:
 		num_pad = self.block_size - len(block)
 		right = (chr(num_pad) * num_pad).encode()
 		return block + right
+
+import platform as _platform
+
+_DARWIN_OVERRIDES_ENABLED = False
+
+def _load_darwin_overrides(import_module=None, warn=None):
+	import_module = import_module or _importlib.import_module
+	warn = warn or _warnings.warn
+	try:
+		mac_crypto = import_module('nsz.nut.mac_crypto')
+	except (ImportError, OSError) as exc:
+		warn(
+			f'Failed to load Darwin crypto backend, falling back to pure Python: {exc}',
+			RuntimeWarning,
+			stacklevel=2,
+		)
+		return None
+
+	return mac_crypto.build_darwin_overrides(
+		AESCBC,
+		AESCTR,
+		AESXTS,
+		AESXTSN,
+		AESECB,
+		Counter.new,
+		uhx,
+	)
+
+def darwin_overrides_enabled():
+	return _DARWIN_OVERRIDES_ENABLED
+
+def enable_darwin_overrides(import_module=None, warn=None):
+	global AESCBC, AESCTR, AESXTS, AESXTSN, AESECB, _DARWIN_OVERRIDES_ENABLED
+	if _DARWIN_OVERRIDES_ENABLED or _platform.system() != 'Darwin':
+		return _DARWIN_OVERRIDES_ENABLED
+	_overrides = _load_darwin_overrides(import_module=import_module, warn=warn)
+	if _overrides is None:
+		return False
+	AESCBC, AESCTR, AESXTS, AESXTSN, AESECB = _overrides
+	_DARWIN_OVERRIDES_ENABLED = True
+	return True
