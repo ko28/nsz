@@ -22,8 +22,13 @@ kCCModeOptionCTR_BE  = 0x0001
 if platform.system() == "Darwin":
     _lib_path = ctypes.util.find_library("System")
     if _lib_path is None:
-        raise ImportError("Could not locate macOS System library — are you on macOS?")
-    _cc = ctypes.CDLL(_lib_path)
+        _lib_path = "/usr/lib/libSystem.B.dylib"
+    try:
+        _cc = ctypes.CDLL(_lib_path)
+    except OSError:
+        raise ImportError(
+            f"Could not load macOS System library at {_lib_path} — are you on macOS?"
+        )
 
     _cc.CCCryptorCreateWithMode.restype  = ctypes.c_int
     _cc.CCCryptorCreateWithMode.argtypes = [
