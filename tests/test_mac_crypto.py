@@ -8,30 +8,9 @@ References:
   AES-ECB: NIST FIPS 197, Appendix B
 """
 import platform
-import sys
 import unittest
 
 mac_only = unittest.skipUnless(platform.system() == "Darwin", "macOS only")
-
-
-def _xts_supported():
-    """Check if CommonCrypto supports XTS mode on this platform."""
-    if platform.system() != "Darwin":
-        return False
-    old_argv = sys.argv
-    sys.argv = ['test']
-    try:
-        from nsz.mac_crypto import MacAESXTS
-        c = MacAESXTS(b'\x00' * 32, b'\x00' * 16, encrypt=True)
-        c.encrypt(b'\x00' * 16)  # Test actual encrypt — CCCryptorUpdate may fail even if create succeeds
-        return True
-    except (RuntimeError, ImportError, OSError):
-        return False
-    finally:
-        sys.argv = old_argv
-
-
-xts_supported = unittest.skipUnless(_xts_supported(), "CommonCrypto XTS not supported on this platform")
 
 
 # ---------------------------------------------------------------------------
@@ -131,13 +110,13 @@ class TestMacAESCTR(unittest.TestCase):
 
 
 class TestMacAESXTS(unittest.TestCase):
-    @xts_supported
+    @mac_only
     def test_encrypt_ieee_vector(self):
         from nsz.mac_crypto import MacAESXTS
         cipher = MacAESXTS(XTS_KEY, XTS_TWEAK, encrypt=True)
         self.assertEqual(cipher.encrypt(XTS_PLAIN), XTS_CIPHER)
 
-    @xts_supported
+    @mac_only
     def test_decrypt_ieee_vector(self):
         from nsz.mac_crypto import MacAESXTS
         cipher = MacAESXTS(XTS_KEY, XTS_TWEAK, encrypt=False)
@@ -147,10 +126,7 @@ class TestMacAESXTS(unittest.TestCase):
     def test_unaligned_input_raises(self):
         """XTS requires input to be a multiple of 16 bytes."""
         from nsz.mac_crypto import MacAESXTS
-        try:
-            cipher = MacAESXTS(XTS_KEY, XTS_TWEAK, encrypt=True)
-        except RuntimeError:
-            self.skipTest("XTS not supported on this platform")
+        cipher = MacAESXTS(XTS_KEY, XTS_TWEAK, encrypt=True)
         with self.assertRaises(ValueError):
             cipher.encrypt(b"not_aligned_____x")  # 17 bytes
 
@@ -161,7 +137,7 @@ class TestMacAESXTS(unittest.TestCase):
         with self.assertRaises((ValueError, RuntimeError)):
             MacAESXTS(b"tooshort", XTS_TWEAK, encrypt=True)
 
-    @xts_supported
+    @mac_only
     def test_large_input_chunking(self):
         """20MB aligned input forces the chunked path."""
         from nsz.mac_crypto import MacAESXTS
@@ -182,14 +158,9 @@ class TestMacAESCBC(unittest.TestCase):
 
     @mac_only
     def test_decrypt_nist(self):
-        old_argv = sys.argv
-        sys.argv = ['test']
-        try:
-            from nsz.mac_crypto import MacAESCBC
-            cipher = MacAESCBC(CBC_KEY, CBC_IV, encrypt=False)
-            self.assertEqual(cipher.decrypt(CBC_CIPHER), CBC_PLAIN)
-        finally:
-            sys.argv = old_argv
+        from nsz.mac_crypto import MacAESCBC
+        cipher = MacAESCBC(CBC_KEY, CBC_IV, encrypt=False)
+        self.assertEqual(cipher.decrypt(CBC_CIPHER), CBC_PLAIN)
 
 
 class TestMacAESECB(unittest.TestCase):

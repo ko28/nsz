@@ -22,13 +22,8 @@ kCCModeOptionCTR_BE  = 0x0001
 if platform.system() == "Darwin":
     _lib_path = ctypes.util.find_library("System")
     if _lib_path is None:
-        _lib_path = "/usr/lib/libSystem.B.dylib"
-    try:
-        _cc = ctypes.CDLL(_lib_path)
-    except OSError:
-        raise ImportError(
-            f"Could not load macOS System library at {_lib_path} — are you on macOS?"
-        )
+        raise ImportError("Could not locate macOS System library — are you on macOS?")
+    _cc = ctypes.CDLL(_lib_path)
 
     _cc.CCCryptorCreateWithMode.restype  = ctypes.c_int
     _cc.CCCryptorCreateWithMode.argtypes = [
@@ -237,48 +232,49 @@ def extract_iv_from_counter(counter_obj) -> bytes:
 # Phase 7: The Unified Fallback Router
 _NATIVE_MODES = {getattr(AES, 'MODE_CTR', 6), getattr(AES, 'MODE_XTS', 7), getattr(AES, 'MODE_CBC', 2), getattr(AES, 'MODE_ECB', 1)}
 
-def create_aes_cipher(key: bytes, mode: int, counter=None, nonce=None, **kwargs):
+def create_aes_cipher(key: bytes, mode: int, *args, **kwargs):
     if platform.system() == "Darwin" and mode in _NATIVE_MODES:
         try:
-            return _create_native_cipher(key, mode, counter=counter, nonce=nonce, **kwargs)
+            return _create_native_cipher(key, mode, *args, **kwargs)
         except Exception as e:
             print(f"[nsz] Native Mac crypto failed for mode={mode}, falling back: {e}")
 
-    return _create_pycryptodome_cipher(key, mode, counter=counter, nonce=nonce, **kwargs)
+    return _create_pycryptodome_cipher(key, mode, *args, **kwargs)
 
-def _create_native_cipher(key, mode, counter=None, nonce=None, **kwargs):
+def _create_native_cipher(key, mode, *args, **kwargs):
     if mode == getattr(AES, 'MODE_CTR', 6):
+        counter = kwargs.get('counter')
         if counter is None:
             raise ValueError("MODE_CTR requires a counter argument")
         iv = extract_iv_from_counter(counter)
         return MacAESCTR(key, iv)
 
     elif mode == getattr(AES, 'MODE_XTS', 7):
-        tweak = nonce
+        tweak = kwargs.get('nonce')
+        if tweak is None and len(args) > 0:
+            tweak = args[0]
         if tweak is None:
-            raise ValueError("MODE_XTS requires a nonce (sector tweak) argument")
+            raise ValueError("MODE_XTS requires a nonce/tweak argument")
         if isinstance(tweak, int):
             tweak = tweak.to_bytes(16, byteorder='little')
-        encrypt = kwargs.pop('encrypt', True)
+        encrypt = kwargs.get('encrypt', True)
         return MacAESXTS(key, tweak, encrypt=encrypt)
 
     elif mode == getattr(AES, 'MODE_CBC', 2):
-        iv = kwargs.pop('iv', None)
+        iv = kwargs.get('iv')
+        if iv is None and len(args) > 0:
+            iv = args[0]
         if iv is None:
             raise ValueError("MODE_CBC requires an iv argument")
-        encrypt = kwargs.pop('encrypt', True)
+        encrypt = kwargs.get('encrypt', True)
         return MacAESCBC(key, iv, encrypt=encrypt)
 
     elif mode == getattr(AES, 'MODE_ECB', 1):
-        encrypt = kwargs.pop('encrypt', True)
+        encrypt = kwargs.get('encrypt', True)
         return MacAESECB(key, encrypt=encrypt)
 
     else:
         raise ValueError(f"Mode {mode} is not in the native set — should not reach here")
 
-def _create_pycryptodome_cipher(key, mode, counter=None, nonce=None, **kwargs):
-    if counter is not None:
-        kwargs['counter'] = counter
-    if nonce is not None:
-        kwargs['nonce'] = nonce
-    return AES.new(key, mode, **kwargs)
+def _create_pycryptodome_cipher(key, mode, *args, **kwargs):
+    return AES.new(key, mode, *args, **kwargs)

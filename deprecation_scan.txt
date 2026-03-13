@@ -1,0 +1,8 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-9.0.2, pluggy-1.6.0
+rootdir: /app
+collected 15 items
+
+tests/test_mac_crypto.py sssssssssssss.s                                 [100%]
+
+======================== 1 passed, 14 skipped in 0.27s =========================

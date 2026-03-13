@@ -18,6 +18,7 @@ setuptools.setup(
 	packages=['nsz', 'nsz.Fs', 'nsz.nut', 'nsz.gui', 'nsz.gui.txt', 'nsz.gui.shaders', 'nsz.gui.layout', 'nsz.gui.json', 'nsz.gui.fonts'],
 	classifiers=[
 		"Programming Language :: Python :: 3",
+		"Programming Language :: Python :: 3.12",
 		"License :: OSI Approved :: MIT License",
 		"Operating System :: OS Independent",
 	],

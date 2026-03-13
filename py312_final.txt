@@ -1,0 +1,23 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-9.0.2, pluggy-1.6.0 -- /home/jules/.pyenv/versions/3.12.13/bin/python
+cachedir: .pytest_cache
+rootdir: /app
+collecting ... collected 15 items
+
+tests/test_mac_crypto.py::TestMacAESCTR::test_bad_key_raises SKIPPED     [  6%]
+tests/test_mac_crypto.py::TestMacAESCTR::test_decrypt_nist SKIPPED (...) [ 13%]
+tests/test_mac_crypto.py::TestMacAESCTR::test_encrypt_nist SKIPPED (...) [ 20%]
+tests/test_mac_crypto.py::TestMacAESCTR::test_large_input_chunking SKIPPED [ 26%]
+tests/test_mac_crypto.py::TestMacAESXTS::test_bad_key_length_raises SKIPPED [ 33%]
+tests/test_mac_crypto.py::TestMacAESXTS::test_decrypt_ieee_vector SKIPPED [ 40%]
+tests/test_mac_crypto.py::TestMacAESXTS::test_encrypt_ieee_vector SKIPPED [ 46%]
+tests/test_mac_crypto.py::TestMacAESXTS::test_large_input_chunking SKIPPED [ 53%]
+tests/test_mac_crypto.py::TestMacAESXTS::test_unaligned_input_raises SKIPPED [ 60%]
+tests/test_mac_crypto.py::TestMacAESCBC::test_decrypt_nist SKIPPED (...) [ 66%]
+tests/test_mac_crypto.py::TestMacAESCBC::test_encrypt_nist SKIPPED (...) [ 73%]
+tests/test_mac_crypto.py::TestMacAESECB::test_decrypt_nist SKIPPED (...) [ 80%]
+tests/test_mac_crypto.py::TestMacAESECB::test_encrypt_nist SKIPPED (...) [ 86%]
+tests/test_mac_crypto.py::TestRouter::test_fallback_on_non_macos PASSED  [ 93%]
+tests/test_mac_crypto.py::TestRouter::test_unsupported_mode_falls_back SKIPPED [100%]
+
+======================== 1 passed, 14 skipped in 0.27s =========================
