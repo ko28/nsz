@@ -1,7 +1,6 @@
 # Pure python AES128 implementation
 # SciresM, 2017
 import importlib as _importlib
-import sys as _sys
 import warnings as _warnings
 from struct import unpack as up, pack as pk
 from binascii import hexlify as hx, unhexlify as uhx
@@ -432,11 +431,7 @@ class AESECB:
 
 import platform as _platform
 
-_DARWIN_NATIVE_CRYPTO_FLAG = '--darwin-native-crypto'
-
-def _darwin_crypto_enabled(argv=None):
-	argv = _sys.argv[1:] if argv is None else argv
-	return _DARWIN_NATIVE_CRYPTO_FLAG in argv
+_DARWIN_OVERRIDES_ENABLED = False
 
 def _load_darwin_overrides(import_module=None, warn=None):
 	import_module = import_module or _importlib.import_module
@@ -461,7 +456,16 @@ def _load_darwin_overrides(import_module=None, warn=None):
 		uhx,
 	)
 
-if _platform.system() == 'Darwin' and _darwin_crypto_enabled():
-	_overrides = _load_darwin_overrides()
-	if _overrides is not None:
-		AESCBC, AESCTR, AESXTS, AESXTSN, AESECB = _overrides
+def darwin_overrides_enabled():
+	return _DARWIN_OVERRIDES_ENABLED
+
+def enable_darwin_overrides(import_module=None, warn=None):
+	global AESCBC, AESCTR, AESXTS, AESXTSN, AESECB, _DARWIN_OVERRIDES_ENABLED
+	if _DARWIN_OVERRIDES_ENABLED or _platform.system() != 'Darwin':
+		return _DARWIN_OVERRIDES_ENABLED
+	_overrides = _load_darwin_overrides(import_module=import_module, warn=warn)
+	if _overrides is None:
+		return False
+	AESCBC, AESCTR, AESXTS, AESXTSN, AESECB = _overrides
+	_DARWIN_OVERRIDES_ENABLED = True
+	return True

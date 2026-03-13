@@ -44,7 +44,7 @@ if platform.system() == "Darwin":
         ctypes.c_size_t,  # tweakLength
         ctypes.c_int,     # numRounds
         ctypes.c_uint,    # options
-        ctypes.c_void_p,  # out: CCCryptorRef*
+        ctypes.POINTER(ctypes.c_void_p),  # out: CCCryptorRef*
     ]
 
     _cc.CCCryptorUpdate.restype  = ctypes.c_int
@@ -54,7 +54,7 @@ if platform.system() == "Darwin":
         ctypes.c_size_t,  # dataInLength
         ctypes.c_void_p,  # dataOut
         ctypes.c_size_t,  # dataOutAvailable
-        ctypes.c_void_p,  # out: dataOutMoved
+        ctypes.POINTER(ctypes.c_size_t),  # out: dataOutMoved
     ]
 
     _cc.CCCryptorRelease.restype  = ctypes.c_int
@@ -228,6 +228,13 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
             raise ValueError(_AES128_KEY_SIZE_ERROR)
         return key
 
+    def validate_sector_size(sector_size):
+        if not isinstance(sector_size, int) or isinstance(sector_size, bool):
+            raise TypeError("sector_size must be a positive integer")
+        if sector_size <= 0:
+            raise ValueError("sector_size must be a positive integer")
+        return sector_size
+
     def probe_ecb_backend(key):
         with MacAESECB(key, encrypt=True) as encrypt_cipher:
             encrypt_cipher.encrypt(b"\0" * 16)
@@ -310,7 +317,8 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
         def decrypt_block_ecb(self, block):
             if self._fallback is not None:
                 return self._fallback.decrypt_block_ecb(block)
-            assert len(block) == self.block_size
+            if len(block) != self.block_size:
+                raise ValueError(f"block must be exactly {self.block_size} bytes")
             return self._decrypt_cipher.decrypt(block)
 
         def pad_block(self, block):
@@ -515,7 +523,7 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
             self.keys = (validate_aes128_key(keys[0]), validate_aes128_key(keys[1]))
             self._native_key = self.keys[0] + self.keys[1]
             self.sector = sector
-            self.sector_size = sector_size
+            self.sector_size = validate_sector_size(sector_size)
             self.block_size = 0x10
             self._fallback = None
             try:
@@ -585,9 +593,9 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
                 self._fallback.set_sector(sector)
 
         def set_sector_size(self, sector_size):
-            self.sector_size = sector_size
+            self.sector_size = validate_sector_size(sector_size)
             if self._fallback is not None:
-                self._fallback.set_sector_size(sector_size)
+                self._fallback.set_sector_size(self.sector_size)
 
         def _tweak_bytes(self, tweak):
             if isinstance(tweak, int):

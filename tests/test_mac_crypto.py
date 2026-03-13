@@ -1,4 +1,6 @@
 import contextlib
+import ctypes
+import importlib
 import platform
 import random
 import sys
@@ -58,8 +60,20 @@ def _build_wrappers():
 
 
 class ImportHookTests(unittest.TestCase):
-    def test_darwin_crypto_flag_defaults_disabled(self):
-        sentinel = types.ModuleType("nsz.nut.mac_crypto")
+    def test_darwin_overrides_are_disabled_by_default(self):
+        aes128 = _load_source_module(
+            AES128_PATH,
+            "test_aes128_darwin_default",
+            platform_name="Darwin",
+        )
+        self.assertFalse(aes128.darwin_overrides_enabled())
+
+    def test_enable_darwin_overrides_applies_overrides(self):
+        aes128 = _load_source_module(
+            AES128_PATH,
+            "test_aes128_darwin_enable",
+            platform_name="Darwin",
+        )
 
         class SentinelAESCBC:
             pass
@@ -76,60 +90,20 @@ class ImportHookTests(unittest.TestCase):
         class SentinelAESECB:
             pass
 
-        sentinel.build_darwin_overrides = lambda *args: (
-            SentinelAESCBC,
-            SentinelAESCTR,
-            SentinelAESXTS,
-            SentinelAESXTSN,
-            SentinelAESECB,
-        )
+        with mock.patch.object(
+            aes128,
+            "_load_darwin_overrides",
+            return_value=(
+                SentinelAESCBC,
+                SentinelAESCTR,
+                SentinelAESXTS,
+                SentinelAESXTSN,
+                SentinelAESECB,
+            ),
+        ):
+            self.assertTrue(aes128.enable_darwin_overrides())
 
-        with mock.patch.dict(sys.modules, {"nsz.nut.mac_crypto": sentinel}):
-            aes128 = _load_source_module(
-                AES128_PATH,
-                "test_aes128_darwin_without_flag",
-                platform_name="Darwin",
-                argv=[],
-            )
-
-        self.assertFalse(aes128._darwin_crypto_enabled([]))
-        self.assertNotEqual(aes128.AESECB, SentinelAESECB)
-
-    def test_darwin_crypto_flag_enables_overrides(self):
-        sentinel = types.ModuleType("nsz.nut.mac_crypto")
-
-        class SentinelAESCBC:
-            pass
-
-        class SentinelAESCTR:
-            pass
-
-        class SentinelAESXTS:
-            pass
-
-        class SentinelAESXTSN:
-            pass
-
-        class SentinelAESECB:
-            pass
-
-        sentinel.build_darwin_overrides = lambda *args: (
-            SentinelAESCBC,
-            SentinelAESCTR,
-            SentinelAESXTS,
-            SentinelAESXTSN,
-            SentinelAESECB,
-        )
-
-        with mock.patch.dict(sys.modules, {"nsz.nut.mac_crypto": sentinel}):
-            aes128 = _load_source_module(
-                AES128_PATH,
-                "test_aes128_darwin_with_flag",
-                platform_name="Darwin",
-                argv=["--darwin-native-crypto"],
-            )
-
-        self.assertTrue(aes128._darwin_crypto_enabled(["--darwin-native-crypto"]))
+        self.assertTrue(aes128.darwin_overrides_enabled())
         self.assertIs(aes128.AESECB, SentinelAESECB)
 
     def test_mac_crypto_import_converts_missing_symbols_into_importerror(self):
@@ -139,6 +113,33 @@ class ImportHookTests(unittest.TestCase):
             with mock.patch("ctypes.CDLL", return_value=fake_cdll):
                 with self.assertRaisesRegex(ImportError, "Required CommonCrypto APIs are unavailable"):
                     _load_source_module(MAC_CRYPTO_PATH, "test_mac_crypto_missing_symbols", platform_name="Darwin")
+
+    def test_mac_crypto_uses_typed_commoncrypto_pointers(self):
+        class FakeFunc:
+            pass
+
+        fake_cdll = types.SimpleNamespace(
+            CCCryptorCreateWithMode=FakeFunc(),
+            CCCryptorUpdate=FakeFunc(),
+            CCCryptorRelease=FakeFunc(),
+        )
+
+        with mock.patch("ctypes.util.find_library", return_value="/usr/lib/libSystem.B.dylib"):
+            with mock.patch("ctypes.CDLL", return_value=fake_cdll):
+                mac_crypto = _load_source_module(
+                    MAC_CRYPTO_PATH,
+                    "test_mac_crypto_typed_pointers",
+                    platform_name="Darwin",
+                )
+
+        self.assertEqual(
+            mac_crypto._cc.CCCryptorCreateWithMode.argtypes[-1],
+            ctypes.POINTER(ctypes.c_void_p),
+        )
+        self.assertEqual(
+            mac_crypto._cc.CCCryptorUpdate.argtypes[-1],
+            ctypes.POINTER(ctypes.c_size_t),
+        )
 
     def test_load_darwin_overrides_warns_on_expected_import_failures(self):
         aes128 = _load_pure_aes128()
@@ -165,6 +166,23 @@ class ImportHookTests(unittest.TestCase):
 
 
 class ContractTests(unittest.TestCase):
+    def test_ecb_decrypt_block_rejects_wrong_size(self):
+        _, _, wrappers = _build_wrappers()
+        AESECB = wrappers[4]
+        cipher = AESECB(b"k" * 16)
+
+        with self.assertRaisesRegex(ValueError, "block must be exactly 16 bytes"):
+            cipher.decrypt_block_ecb(b"x" * 15)
+
+    def test_configure_darwin_native_crypto_uses_parsed_flag(self):
+        with mock.patch.object(sys, "argv", ["nsz"]):
+            nsz = importlib.import_module("nsz")
+
+        with mock.patch.object(nsz.aes128, "enable_darwin_overrides") as enable:
+            nsz._configure_darwin_native_crypto(types.SimpleNamespace(darwin_native_crypto=True))
+
+        enable.assert_called_once_with()
+
     def test_ecb_pad_block_rejects_oversized_blocks(self):
         _, _, wrappers = _build_wrappers()
         AESECB = wrappers[4]
@@ -211,6 +229,24 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(type(pure_ctr).__name__, "AESCTR")
         self.assertEqual(type(current_ctr).__name__, "AESCTR")
 
+    def test_xtsn_sector_size_must_be_positive_integer(self):
+        _, _, wrappers = _build_wrappers()
+        AESXTSN = wrappers[3]
+        keys = (b"a" * 16, b"b" * 16)
+
+        for bad_value, error_type in ((0, ValueError), (-1, ValueError), ("512", TypeError), (False, TypeError)):
+            with self.subTest(bad_value=bad_value):
+                with self.assertRaisesRegex(error_type, "sector_size must be a positive integer"):
+                    AESXTSN(keys, sector_size=bad_value)
+
+    def test_xtsn_set_sector_size_rejects_invalid_values(self):
+        _, _, wrappers = _build_wrappers()
+        AESXTSN = wrappers[3]
+        cipher = AESXTSN((b"a" * 16, b"b" * 16), sector_size=0x200)
+
+        with self.assertRaisesRegex(ValueError, "sector_size must be a positive integer"):
+            cipher.set_sector_size(0)
+
     def test_dead_factory_helpers_were_removed(self):
         _, mac_crypto, _ = _build_wrappers()
         self.assertFalse(hasattr(mac_crypto, "create_aes_cipher"))
@@ -218,6 +254,30 @@ class ContractTests(unittest.TestCase):
 
 
 class FallbackTests(unittest.TestCase):
+    def test_update_chunks_large_buffers(self):
+        mac_crypto = _load_mac_crypto()
+
+        class DummyCipher(mac_crypto._MacAESBase):
+            def __init__(self):
+                super().__init__()
+                self._cryptor_ref = ctypes.c_void_p(1)
+                self.chunks = []
+
+            def _update_chunk(self, data):
+                self.chunks.append(bytes(data))
+                return bytes(data)
+
+            def _release(self):
+                self._cryptor_ref = None
+
+        cipher = DummyCipher()
+        data = b"abcdefghijklmnopqrstuvwxyz"
+
+        with mock.patch.object(mac_crypto, "_CHUNK_SIZE", 8):
+            self.assertEqual(cipher._update(data), data)
+
+        self.assertEqual(cipher.chunks, [b"abcdefgh", b"ijklmnop", b"qrstuvwx", b"yz"])
+
     def test_non_darwin_module_builds_wrappers_that_fall_back_cleanly(self):
         pure = _load_pure_aes128()
         mac_crypto = _load_source_module(
@@ -507,3 +567,29 @@ class DarwinParityTests(unittest.TestCase):
                             pure.AESXTSN(keys, sector_size, sector).decrypt(data),
                             AESXTSN(keys, sector_size, sector).decrypt(data),
                         )
+
+    def test_ctr_seek_and_bktrseek_match_pure_outputs(self):
+        pure, _, wrappers = _build_wrappers()
+        AESCTR = wrappers[1]
+        rng = random.Random(9876)
+
+        def rb(size):
+            return bytes(rng.getrandbits(8) for _ in range(size))
+
+        key = rb(16)
+        nonce = rb(16)
+        data = rb(64)
+        pure_cipher = pure.AESCTR(key, nonce, 0)
+        wrapped_cipher = AESCTR(key, nonce, 0)
+
+        for offset in (0, 16, 32, 0x100, 0x1230):
+            with self.subTest(mode="seek", offset=offset):
+                pure_cipher.seek(offset)
+                wrapped_cipher.seek(offset)
+                self.assertEqual(pure_cipher.encrypt(data), wrapped_cipher.encrypt(data))
+
+        for offset, ctr_val, virtual_offset in ((0, 7, 0), (0x80, 7, 0), (0x20, 3, 0x100)):
+            with self.subTest(mode="bktrSeek", offset=offset, ctr_val=ctr_val, virtual_offset=virtual_offset):
+                pure_cipher.bktrSeek(offset, ctr_val, virtual_offset)
+                wrapped_cipher.bktrSeek(offset, ctr_val, virtual_offset)
+                self.assertEqual(pure_cipher.encrypt(data), wrapped_cipher.encrypt(data))
