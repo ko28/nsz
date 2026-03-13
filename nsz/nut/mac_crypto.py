@@ -1,10 +1,6 @@
 import ctypes
 import ctypes.util
 import platform
-try:
-    from Cryptodome.Cipher import AES
-except ImportError:
-    from Crypto.Cipher import AES
 
 # Phase 2: Hardcoded Constants
 kCCAlgorithmAES      = 0
@@ -18,12 +14,21 @@ kCCDecrypt           = 1
 kCCSuccess           = 0
 kCCModeOptionCTR_BE  = 0x0001
 
+_AES128_KEY_SIZE_ERROR = "Key must be of size %X!" % 0x10
+_NATIVE_INIT_FALLBACK_EXCEPTIONS = (OSError, RuntimeError)
+
 # Phase 3: ctypes Bindings
 if platform.system() == "Darwin":
     _lib_path = ctypes.util.find_library("System")
     if _lib_path is None:
         raise ImportError("Could not locate macOS System library — are you on macOS?")
     _cc = ctypes.CDLL(_lib_path)
+    try:
+        _cc.CCCryptorCreateWithMode
+        _cc.CCCryptorUpdate
+        _cc.CCCryptorRelease
+    except AttributeError as exc:
+        raise ImportError("Required CommonCrypto APIs are unavailable on this macOS version") from exc
 
     _cc.CCCryptorCreateWithMode.restype  = ctypes.c_int
     _cc.CCCryptorCreateWithMode.argtypes = [
@@ -143,11 +148,8 @@ class MacAESXTS(_MacAESBase):
     def __init__(self, key: bytes, tweak: bytes, encrypt: bool):
         super().__init__()
         self.key = key
-        if len(key) not in (32, 64):
-            raise ValueError(
-                f"XTS key must be 32 bytes (AES-128-XTS) or 64 bytes (AES-256-XTS) "
-                f"(got {len(key)}). XTS concatenates two equal subkeys."
-            )
+        if len(key) != 32:
+            raise ValueError("XTS key must be 32 bytes (two 16-byte AES-128 keys)")
         if len(tweak) != 16:
             raise ValueError(f"XTS tweak must be 16 bytes (got {len(tweak)})")
         op = kCCEncrypt if encrypt else kCCDecrypt
@@ -212,91 +214,48 @@ class MacAESECB(_MacAESBase):
         self._check_alignment(data)
         return self._update(data)
 
-# Phase 6: CTR Counter Extraction Bridge
-def extract_iv_from_counter(counter_obj) -> bytes:
-    if isinstance(counter_obj, dict):
-        prefix = counter_obj.get('prefix', b'')
-        suffix = counter_obj.get('suffix', b'')
-        counter_len = counter_obj.get('counter_len', 0)
-        initial_value = counter_obj.get('initial_value', 0)
-        little_endian = counter_obj.get('little_endian', False)
-        counter_bytes = initial_value.to_bytes(counter_len, 'little' if little_endian else 'big')
-        block_bytes = prefix + counter_bytes + suffix
-        if len(block_bytes) == 16:
-            return block_bytes
-    if hasattr(counter_obj, '_initial_value'):
-        return counter_obj._initial_value.to_bytes(16, byteorder='big')
-    if callable(counter_obj):
-        block = counter_obj()
-        if isinstance(block, bytes) and len(block) == 16:
-            return block
-    raise RuntimeError(
-        "Could not extract IV from pycryptodome Counter object."
-    )
-
-# Phase 7: The Unified Fallback Router
-_NATIVE_MODES = {getattr(AES, 'MODE_CTR', 6), getattr(AES, 'MODE_CBC', 2), getattr(AES, 'MODE_ECB', 1)}
-
-def create_aes_cipher(key: bytes, mode: int, *args, **kwargs):
-    if platform.system() == "Darwin" and mode in _NATIVE_MODES:
-        try:
-            return _create_native_cipher(key, mode, *args, **kwargs)
-        except Exception as e:
-            print(f"[nsz] Native Mac crypto failed for mode={mode}, falling back: {e}")
-
-    return _create_pycryptodome_cipher(key, mode, *args, **kwargs)
-
-def _create_native_cipher(key, mode, *args, **kwargs):
-    if mode == getattr(AES, 'MODE_CTR', 6):
-        counter = kwargs.get('counter')
-        if counter is None:
-            raise ValueError("MODE_CTR requires a counter argument")
-        iv = extract_iv_from_counter(counter)
-        return MacAESCTR(key, iv)
-
-    elif mode == getattr(AES, 'MODE_XTS', 7):
-        tweak = kwargs.get('nonce')
-        if tweak is None and len(args) > 0:
-            tweak = args[0]
-        if tweak is None:
-            raise ValueError("MODE_XTS requires a nonce/tweak argument")
-        if isinstance(tweak, int):
-            tweak = tweak.to_bytes(16, byteorder='little')
-        encrypt = kwargs.get('encrypt', True)
-        return MacAESXTS(key, tweak, encrypt=encrypt)
-
-    elif mode == getattr(AES, 'MODE_CBC', 2):
-        iv = kwargs.get('iv')
-        if iv is None and len(args) > 0:
-            iv = args[0]
-        if iv is None:
-            raise ValueError("MODE_CBC requires an iv argument")
-        encrypt = kwargs.get('encrypt', True)
-        return MacAESCBC(key, iv, encrypt=encrypt)
-
-    elif mode == getattr(AES, 'MODE_ECB', 1):
-        encrypt = kwargs.get('encrypt', True)
-        return MacAESECB(key, encrypt=encrypt)
-
-    else:
-        raise ValueError(f"Mode {mode} is not in the native set — should not reach here")
-
-def _create_pycryptodome_cipher(key, mode, *args, **kwargs):
-    return AES.new(key, mode, *args, **kwargs)
-
 
 def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, pure_aesecb, counter_new, uhx_fn):
+    def validate_aes128_key(key):
+        key = bytes(key)
+        if len(key) != 16:
+            raise ValueError(_AES128_KEY_SIZE_ERROR)
+        return key
+
+    def probe_ecb_backend(key):
+        with MacAESECB(key, encrypt=True) as encrypt_cipher:
+            encrypt_cipher.encrypt(b"\0" * 16)
+        with MacAESECB(key, encrypt=False) as decrypt_cipher:
+            decrypt_cipher.decrypt(b"\0" * 16)
+
+    def probe_cbc_backend(key, iv):
+        with MacAESCBC(key, iv, encrypt=True) as encrypt_cipher:
+            encrypt_cipher.encrypt(b"\0" * 16)
+        with MacAESCBC(key, iv, encrypt=False) as decrypt_cipher:
+            decrypt_cipher.decrypt(b"\0" * 16)
+
+    def probe_ctr_backend(key, iv):
+        with MacAESCTR(key, iv) as cipher:
+            cipher.encrypt(b"\0" * 16)
+
+    def probe_xts_backend(key, tweak):
+        with MacAESXTS(key, tweak, encrypt=True) as encrypt_cipher:
+            encrypt_cipher.encrypt(b"\0" * 16)
+        with MacAESXTS(key, tweak, encrypt=False) as decrypt_cipher:
+            decrypt_cipher.decrypt(b"\0" * 16)
+
     class AESECB:
         """macOS-backed AES ECB cipher with aes128.py compatibility helpers."""
 
         def __init__(self, key):
-            self.key = bytes(key)
+            self.key = validate_aes128_key(key)
             self.block_size = 0x10
             self._fallback = None
             try:
+                probe_ecb_backend(self.key)
                 self._encrypt_cipher = MacAESECB(self.key, encrypt=True)
                 self._decrypt_cipher = MacAESECB(self.key, encrypt=False)
-            except Exception:
+            except _NATIVE_INIT_FALLBACK_EXCEPTIONS:
                 self._fallback = pure_aesecb(self.key)
                 self._encrypt_cipher = None
                 self._decrypt_cipher = None
@@ -304,22 +263,26 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
         def encrypt(self, data):
             if self._fallback is not None:
                 return self._fallback.encrypt(data)
-            out = b""
-            while data:
-                out += self.encrypt_block_ecb(data[:0x10])
-                data = data[0x10:]
-            return out
+            if not data:
+                return b""
+            aligned_len = len(data) - (len(data) % self.block_size)
+            if aligned_len == len(data):
+                return self._encrypt_cipher.encrypt(data)
+
+            out = []
+            if aligned_len:
+                out.append(self._encrypt_cipher.encrypt(data[:aligned_len]))
+            out.append(self.encrypt_block_ecb(data[aligned_len:]))
+            return b"".join(out)
 
         def decrypt(self, data):
             if self._fallback is not None:
                 return self._fallback.decrypt(data)
             if len(data) % self.block_size:
                 raise ValueError("Data is not aligned to block size!")
-            out = b""
-            while data:
-                out += self.decrypt_block_ecb(data[:0x10])
-                data = data[0x10:]
-            return out
+            if not data:
+                return b""
+            return self._decrypt_cipher.decrypt(data)
 
         def encrypt_block_ecb(self, block):
             if self._fallback is not None:
@@ -342,31 +305,36 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
         """macOS-backed AES CBC cipher preserving the existing aes128.py API."""
 
         def __init__(self, key, iv):
-            self.key = bytes(key)
+            self.key = validate_aes128_key(key)
             self.block_size = 0x10
             if len(iv) != self.block_size:
                 raise ValueError("IV must be of size %X!" % self.block_size)
             self.iv = bytes(iv)
             self._fallback = None
             try:
-                with MacAESCBC(self.key, self.iv, encrypt=True):
-                    pass
-            except Exception:
+                probe_cbc_backend(self.key, self.iv)
+            except _NATIVE_INIT_FALLBACK_EXCEPTIONS:
                 self._fallback = pure_aescbc(self.key, self.iv)
 
         def encrypt(self, data, iv=None):
             if self._fallback is not None:
                 return self._fallback.encrypt(data, iv)
+            if not data:
+                return b""
             if iv is None:
                 iv = self.iv
-            return MacAESCBC(self.key, bytes(iv), encrypt=True).encrypt(data)
+            with MacAESCBC(self.key, bytes(iv), encrypt=True) as cipher:
+                return cipher.encrypt(data)
 
         def decrypt(self, data, iv=None):
             if self._fallback is not None:
                 return self._fallback.decrypt(data, iv)
+            if not data:
+                return b""
             if iv is None:
                 iv = self.iv
-            return MacAESCBC(self.key, bytes(iv), encrypt=False).decrypt(data)
+            with MacAESCBC(self.key, bytes(iv), encrypt=False) as cipher:
+                return cipher.decrypt(data)
 
         def set_iv(self, iv):
             if len(iv) != self.block_size:
@@ -384,7 +352,16 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
             self.ctr = None
             self.aes = None
             self._fallback = None
-            self.seek(offset)
+            self._set_ctr_state(self.nonce[0:8], offset)
+            try:
+                probe_ctr_backend(self.key, self._iv_from_prefix(self.nonce[0:8], offset))
+                self.aes = MacAESCTR(self.key, self._iv_from_prefix(self.nonce[0:8], offset))
+            except _NATIVE_INIT_FALLBACK_EXCEPTIONS:
+                self._fallback = pure_aesctr(self.key, self.nonce, offset)
+                self.aes = self._fallback.aes
+
+        def _set_ctr_state(self, prefix, offset):
+            self.ctr = counter_new(64, prefix=prefix, initial_value=(offset >> 4))
 
         def encrypt(self, data, ctr=None):
             if self._fallback is not None:
@@ -397,33 +374,25 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
             return self.encrypt(data, ctr)
 
         def seek(self, offset):
-            self.ctr = counter_new(64, prefix=self.nonce[0:8], initial_value=(offset >> 4))
+            self._set_ctr_state(self.nonce[0:8], offset)
             if self._fallback is not None:
                 self._fallback.seek(offset)
                 self.aes = self._fallback.aes
                 return
-            try:
-                self.aes = MacAESCTR(self.key, self._iv_from_prefix(self.nonce[0:8], offset))
-            except Exception:
-                self._fallback = pure_aesctr(self.key, self.nonce, offset)
-                self.aes = self._fallback.aes
+            self.aes = MacAESCTR(self.key, self._iv_from_prefix(self.nonce[0:8], offset))
 
         def bktrPrefix(self, ctr_val):
             return self.nonce[0:4] + ctr_val.to_bytes(4, "big")
 
         def bktrSeek(self, offset, ctr_val, virtualOffset=0):
             offset += virtualOffset
-            self.ctr = counter_new(64, prefix=self.bktrPrefix(ctr_val), initial_value=(offset >> 4))
+            prefix = self.bktrPrefix(ctr_val)
+            self._set_ctr_state(prefix, offset)
             if self._fallback is not None:
                 self._fallback.bktrSeek(offset, ctr_val)
                 self.aes = self._fallback.aes
                 return
-            try:
-                self.aes = MacAESCTR(self.key, self._iv_from_prefix(self.bktrPrefix(ctr_val), offset))
-            except Exception:
-                self._fallback = pure_aesctr(self.key, self.nonce, offset)
-                self._fallback.bktrSeek(offset, ctr_val)
-                self.aes = self._fallback.aes
+            self.aes = MacAESCTR(self.key, self._iv_from_prefix(prefix, offset))
 
         def _iv_from_prefix(self, prefix, offset):
             return bytes(prefix) + (offset >> 4).to_bytes(8, "big")
@@ -433,15 +402,20 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
 
         def __init__(self, keys, sector=0):
             keys = bytes(keys)
-            if len(keys) not in (32, 64):
-                raise ValueError("XTS key must be 32 bytes (AES-128-XTS) or 64 bytes (AES-256-XTS)")
+            if len(keys) != 32:
+                raise ValueError(_AES128_KEY_SIZE_ERROR)
             half = len(keys) // 2
-            self.keys = keys[:half], keys[half:]
+            self.keys = validate_aes128_key(keys[:half]), validate_aes128_key(keys[half:])
             self._native_key = self.keys[0] + self.keys[1]
             self.sector = sector
             self.block_size = 0x10
             self.sector_size = 0x200
             self._fallback = None
+            try:
+                tweak = self._tweak_bytes(self.get_tweak(self.sector))
+                probe_xts_backend(self._native_key, tweak)
+            except _NATIVE_INIT_FALLBACK_EXCEPTIONS:
+                self._fallback = pure_aesxts(self._native_key, self.sector)
 
         def encrypt(self, data, sector=None):
             if self._fallback is not None:
@@ -450,26 +424,21 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
                 sector = self.sector
             if len(data) % self.block_size:
                 raise ValueError("Data is not aligned to block size!")
-            out = b""
+            out = []
             while data:
                 tweak = self.get_tweak(sector)
-                out += self.encrypt_sector(data[:self.sector_size], tweak)
+                out.append(self.encrypt_sector(data[:self.sector_size], tweak))
                 data = data[self.sector_size:]
                 sector += 1
-            return out
+            return b"".join(out)
 
         def encrypt_sector(self, data, tweak):
             if self._fallback is not None:
                 return self._fallback.encrypt_sector(data, tweak)
             if len(data) % self.block_size:
                 raise ValueError("Data is not aligned to block size!")
-            try:
-                return MacAESXTS(self._native_key, self._tweak_bytes(tweak), encrypt=True).encrypt(data)
-            except Exception:
-                if len(self._native_key) != 32:
-                    raise
-                self._fallback = pure_aesxts(self._native_key, self.sector)
-                return self._fallback.encrypt_sector(data, tweak)
+            with MacAESXTS(self._native_key, self._tweak_bytes(tweak), encrypt=True) as cipher:
+                return cipher.encrypt(data)
 
         def decrypt(self, data, sector=None):
             if self._fallback is not None:
@@ -478,26 +447,21 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
                 sector = self.sector
             if len(data) % self.block_size:
                 raise ValueError("Data is not aligned to block size!")
-            out = b""
+            out = []
             while data:
                 tweak = self.get_tweak(sector)
-                out += self.decrypt_sector(data[:self.sector_size], tweak)
+                out.append(self.decrypt_sector(data[:self.sector_size], tweak))
                 data = data[self.sector_size:]
                 sector += 1
-            return out
+            return b"".join(out)
 
         def decrypt_sector(self, data, tweak):
             if self._fallback is not None:
                 return self._fallback.decrypt_sector(data, tweak)
             if len(data) % self.block_size:
                 raise ValueError("Data is not aligned to block size!")
-            try:
-                return MacAESXTS(self._native_key, self._tweak_bytes(tweak), encrypt=False).decrypt(data)
-            except Exception:
-                if len(self._native_key) != 32:
-                    raise
-                self._fallback = pure_aesxts(self._native_key, self.sector)
-                return self._fallback.decrypt_sector(data, tweak)
+            with MacAESXTS(self._native_key, self._tweak_bytes(tweak), encrypt=False) as cipher:
+                return cipher.decrypt(data)
 
         def get_tweak(self, sector=None):
             if sector is None:
@@ -524,14 +488,17 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
         def __init__(self, keys, sector_size=0x200, sector=0):
             if not (type(keys) is tuple and len(keys) == 2):
                 raise TypeError("XTS mode requires a tuple of two keys.")
-            self.keys = (bytes(keys[0]), bytes(keys[1]))
+            self.keys = (validate_aes128_key(keys[0]), validate_aes128_key(keys[1]))
             self._native_key = self.keys[0] + self.keys[1]
-            if len(self._native_key) not in (32, 64):
-                raise ValueError("XTS key must be 32 bytes (AES-128-XTS) or 64 bytes (AES-256-XTS)")
             self.sector = sector
             self.sector_size = sector_size
             self.block_size = 0x10
             self._fallback = None
+            try:
+                tweak = self._tweak_bytes(self.get_tweak(self.sector))
+                probe_xts_backend(self._native_key, tweak)
+            except _NATIVE_INIT_FALLBACK_EXCEPTIONS:
+                self._fallback = pure_aesxtsn(self.keys, self.sector_size, self.sector)
 
         def encrypt(self, data, sector=None):
             if self._fallback is not None:
@@ -540,26 +507,21 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
                 sector = self.sector
             if len(data) % self.block_size:
                 raise ValueError("Data is not aligned to block size!")
-            out = b""
+            out = []
             while data:
                 tweak = self.get_tweak(sector)
-                out += self.encrypt_sector(data[:self.sector_size], tweak)
+                out.append(self.encrypt_sector(data[:self.sector_size], tweak))
                 data = data[self.sector_size:]
                 sector += 1
-            return out
+            return b"".join(out)
 
         def encrypt_sector(self, data, tweak):
             if self._fallback is not None:
                 return self._fallback.encrypt_sector(data, tweak)
             if len(data) % self.block_size:
                 raise ValueError("Data is not aligned to block size!")
-            try:
-                return MacAESXTS(self._native_key, self._tweak_bytes(tweak), encrypt=True).encrypt(data)
-            except Exception:
-                if len(self._native_key) != 32:
-                    raise
-                self._fallback = pure_aesxtsn(self.keys, self.sector_size, self.sector)
-                return self._fallback.encrypt_sector(data, tweak)
+            with MacAESXTS(self._native_key, self._tweak_bytes(tweak), encrypt=True) as cipher:
+                return cipher.encrypt(data)
 
         def decrypt(self, data, sector=None):
             if self._fallback is not None:
@@ -568,26 +530,21 @@ def build_darwin_overrides(pure_aescbc, pure_aesctr, pure_aesxts, pure_aesxtsn, 
                 sector = self.sector
             if len(data) % self.block_size:
                 raise ValueError("Data is not aligned to block size!")
-            out = b""
+            out = []
             while data:
                 tweak = self.get_tweak(sector)
-                out += self.decrypt_sector(data[:self.sector_size], tweak)
+                out.append(self.decrypt_sector(data[:self.sector_size], tweak))
                 data = data[self.sector_size:]
                 sector += 1
-            return out
+            return b"".join(out)
 
         def decrypt_sector(self, data, tweak):
             if self._fallback is not None:
                 return self._fallback.decrypt_sector(data, tweak)
             if len(data) % self.block_size:
                 raise ValueError("Data is not aligned to block size!")
-            try:
-                return MacAESXTS(self._native_key, self._tweak_bytes(tweak), encrypt=False).decrypt(data)
-            except Exception:
-                if len(self._native_key) != 32:
-                    raise
-                self._fallback = pure_aesxtsn(self.keys, self.sector_size, self.sector)
-                return self._fallback.decrypt_sector(data, tweak)
+            with MacAESXTS(self._native_key, self._tweak_bytes(tweak), encrypt=False) as cipher:
+                return cipher.decrypt(data)
 
         def get_tweak(self, sector=None):
             if sector is None:

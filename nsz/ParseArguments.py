@@ -39,6 +39,7 @@ class ParseArguments:
 		parser.add_argument('--undupe-old-versions',action='store_true', default=False, help='Removes every old version as long there is a newer one of the same titleID.')
 		parser.add_argument('-c', '--create', help='Inverse of --extract. Repacks files/folders to an NSP. Example: --create out.nsp .\\in')
 		parser.add_argument('--machine-readable', action='store_true', default=False, help='Restricts terminal output and reports in a way that is easier for a machine to read.')
+		parser.add_argument('--darwin-native-crypto', action='store_true', default=False, help='Enable the macOS native crypto backend.')
 
 		args = parser.parse_args()
 		return args
